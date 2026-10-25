@@ -1,0 +1,7 @@
+nvidia-ml-py
+numpy
+pyyaml
+httpx
+huggingface_hub
+datasets
+transformers

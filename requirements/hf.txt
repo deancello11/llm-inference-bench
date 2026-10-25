@@ -1,0 +1,4 @@
+torch
+accelerate
+bitsandbytes
+zeus          # optional: only for scripts/zeus_crosscheck.py (older releases: zeus-ml)

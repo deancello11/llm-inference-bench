@@ -1,0 +1,167 @@
+"""llama.cpp adapter: drives `llama-server` (continuous batching via --parallel slots).
+
+The server is (re)started whenever the concurrency level changes, with one slot per
+concurrent request. Prompts are sent as raw token ids so input length is exact, prefix
+caching is disabled per request, and EOS is ignored so output length is exact.
+
+Silent-failure guard: we parse the server log and refuse to benchmark unless ALL layers
+were offloaded to the GPU (a CPU-fallback llama.cpp looks 10x slower and is a classic
+benchmarking mistake).
+"""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import httpx
+
+from ..config import RESULTS_DIR, ROOT
+from .base import Adapter, GenResult
+
+
+def find_binary(name: str, env_var: str) -> str:
+    if os.environ.get(env_var):
+        return os.environ[env_var]
+    exe = name + (".exe" if os.name == "nt" else "")
+    local = ROOT / "llama.cpp" / "build" / "bin" / exe
+    if local.exists():
+        return str(local)
+    found = shutil.which(name)
+    if found:
+        return found
+    raise FileNotFoundError(f"{name} not found. Build llama.cpp (scripts/setup_envs.sh) or set ${env_var}.")
+
+
+def gguf_path(cfg) -> str:
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(cfg.checkpoint, cfg.file)
+
+
+class LlamaCppAdapter(Adapter):
+    PORT = 8089
+
+    def load(self) -> None:
+        self.server_bin = find_binary("llama-server", "LLAMA_SERVER_BIN")
+        self.model_path = gguf_path(self.cfg)
+        self.proc: subprocess.Popen | None = None
+        self.parallel = 0
+        self.log_dir = pathlib.Path(RESULTS_DIR) / "logs"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.load_info = {
+            "weights_bytes": os.path.getsize(self.model_path),
+            "gguf_file": self.cfg.file,
+            "server_bin": self.server_bin,
+        }
+
+    # ---- server lifecycle --------------------------------------------------------
+    def _stop_server(self):
+        if self.proc:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+            self.proc = None
+            time.sleep(2)  # let the driver release memory before the next load
+
+    def _start_server(self, parallel: int):
+        self._stop_server()
+        s = self.settings
+        log_path = self.log_dir / f"llama-server_{self.cfg.id}_np{parallel}.log"
+        cmd = [
+            self.server_bin, "-m", self.model_path,
+            "-ngl", str(s["llamacpp_ngl"]),
+            "--parallel", str(parallel),
+            "--ctx-size", str(parallel * s["llamacpp_slot_ctx"]),
+            "--host", "127.0.0.1", "--port", str(self.PORT),
+        ]
+        self._log = open(log_path, "w", encoding="utf-8")
+        self.proc = subprocess.Popen(cmd, stdout=self._log, stderr=subprocess.STDOUT)
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"llama-server exited early; see {log_path}")
+            try:
+                if httpx.get(f"http://127.0.0.1:{self.PORT}/health", timeout=2).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            time.sleep(1)
+        else:
+            raise RuntimeError(f"llama-server did not become healthy; see {log_path}")
+        self.parallel = parallel
+        self._check_gpu_offload(log_path)
+
+    def _check_gpu_offload(self, log_path: pathlib.Path):
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r"offloaded (\d+)/(\d+) layers to GPU", text)
+        if not m:
+            raise RuntimeError(f"could not find GPU offload line in {log_path}; is this a CUDA build?")
+        done, total = int(m.group(1)), int(m.group(2))
+        self.load_info["gpu_layers"] = f"{done}/{total}"
+        if done != total:
+            raise RuntimeError(f"llama.cpp offloaded only {done}/{total} layers to GPU; refusing to benchmark")
+
+    def prepare(self, concurrency: int):
+        if self.parallel != concurrency:
+            self._start_server(concurrency)
+
+    # ---- benchmark path ----------------------------------------------------------
+    def _one(self, prompt: list[int], n: int, t0: float, keep_text: bool) -> GenResult:
+        body = {
+            "prompt": prompt, "n_predict": n, "stream": True,
+            "temperature": 0.0, "top_k": 1, "repeat_penalty": 1.0,
+            "ignore_eos": True, "cache_prompt": False,
+        }
+        first = None
+        n_tok = 0
+        text = []
+        with httpx.Client(timeout=None) as client:
+            with client.stream("POST", f"http://127.0.0.1:{self.PORT}/completion", json=body) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    ev = json.loads(line[6:])
+                    if first is None:
+                        first = time.perf_counter()
+                    if ev.get("stop"):
+                        n_tok = ev.get("tokens_predicted", n_tok)
+                    else:
+                        text.append(ev.get("content", ""))
+        end = time.perf_counter()
+        return GenResult(first - t0, end - t0, n_tok, "".join(text) if keep_text else None)
+
+    def generate(self, prompts, max_new_tokens, keep_text=False):
+        assert self.parallel >= len(prompts), "call prepare(concurrency) first"
+        t0 = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=len(prompts)) as ex:
+            futs = [ex.submit(self._one, p, max_new_tokens, t0, keep_text) for p in prompts]
+            return [f.result() for f in futs]
+
+    # ---- quality path ------------------------------------------------------------
+    def next_token_topk_batch(self, prompts, k=20):
+        out = []
+        with httpx.Client(timeout=120) as client:
+            for p in prompts:
+                body = {"prompt": p, "n_predict": 1, "temperature": 0.0, "n_probs": k,
+                        "cache_prompt": False, "post_sampling_probs": False}
+                r = client.post(f"http://127.0.0.1:{self.PORT}/completion", json=body)
+                r.raise_for_status()
+                cp = r.json()["completion_probabilities"][0]
+                if "top_logprobs" in cp:                       # newer servers
+                    out.append([(e["token"], e["logprob"]) for e in cp["top_logprobs"]])
+                else:                                          # older servers
+                    import math
+                    out.append([(e["tok_str"], math.log(max(e["prob"], 1e-30))) for e in cp["probs"]])
+        return out
+
+    def close(self):
+        self._stop_server()

@@ -1,0 +1,1 @@
+vllm          # pulls its own pinned torch; keep this venv separate

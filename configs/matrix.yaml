@@ -1,0 +1,88 @@
+# The experiment matrix. Everything the benchmark runs is declared here.
+# Add/remove configs by editing this file; no code changes needed.
+
+model:
+  name: Qwen2.5-3B-Instruct
+  tokenizer: Qwen/Qwen2.5-3B-Instruct   # all stacks share this tokenizer's token ids
+
+workloads:
+  short: {input_len: 128,  output_len: 256}
+  long:  {input_len: 1024, output_len: 256}
+
+concurrency: [1, 8, 32]
+
+settings:
+  # vLLM preallocates this fraction of GPU memory for weights + KV cache, so its
+  # raw "VRAM used" is a setting, not a measurement. We report weight bytes and
+  # KV-cache capacity separately (see README, "Memory methodology").
+  vllm_gpu_memory_utilization: 0.60
+  vllm_max_model_len: 4096
+  vllm_max_num_seqs: 64
+  # llama-server splits --ctx-size across --parallel slots; each slot gets this many tokens.
+  llamacpp_slot_ctx: 2048
+  llamacpp_ngl: 99
+  # Idle-power baseline measured after model load, before any timed run.
+  idle_seconds: 20
+
+configs:
+  # ---- Hugging Face Transformers (baseline, static batching) ----
+  - id: hf-fp16
+    stack: hf
+    precision: fp16
+    checkpoint: Qwen/Qwen2.5-3B-Instruct
+    notes: "Plain FP16, SDPA attention."
+
+  - id: hf-int8-bnb
+    stack: hf
+    precision: int8-bnb
+    quantization: int8
+    checkpoint: Qwen/Qwen2.5-3B-Instruct
+    notes: "bitsandbytes LLM.int8() (mixed-precision decomposition). Known to be slow."
+
+  - id: hf-nf4-bnb
+    stack: hf
+    precision: nf4-bnb
+    quantization: nf4
+    checkpoint: Qwen/Qwen2.5-3B-Instruct
+    notes: "bitsandbytes NF4, FP16 compute, no double quant. Quantized at load time."
+
+  # ---- vLLM (PagedAttention + continuous batching) ----
+  - id: vllm-fp16
+    stack: vllm
+    precision: fp16
+    checkpoint: Qwen/Qwen2.5-3B-Instruct
+
+  - id: vllm-awq
+    stack: vllm
+    precision: awq-int4
+    quantization: awq
+    checkpoint: Qwen/Qwen2.5-3B-Instruct-AWQ
+    notes: "Official Qwen AWQ checkpoint, group size 128. vLLM picks the Marlin kernel when supported."
+
+  - id: vllm-gptq
+    stack: vllm
+    precision: gptq-int4
+    quantization: gptq
+    checkpoint: Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4
+    notes: "Official Qwen GPTQ-Int4 checkpoint. vLLM picks gptq_marlin when supported."
+
+  # ---- llama.cpp (llama-server, GGUF, all layers offloaded) ----
+  - id: llamacpp-f16
+    stack: llamacpp
+    precision: gguf-f16
+    checkpoint: Qwen/Qwen2.5-3B-Instruct-GGUF
+    file: qwen2.5-3b-instruct-fp16.gguf
+    notes: "Extra config (not in the original 8): same-precision comparison against HF/vLLM FP16."
+
+  - id: llamacpp-q8
+    stack: llamacpp
+    precision: gguf-q8_0
+    checkpoint: Qwen/Qwen2.5-3B-Instruct-GGUF
+    file: qwen2.5-3b-instruct-q8_0.gguf
+
+  - id: llamacpp-q4km
+    stack: llamacpp
+    precision: gguf-q4_k_m
+    checkpoint: Qwen/Qwen2.5-3B-Instruct-GGUF
+    file: qwen2.5-3b-instruct-q4_k_m.gguf
+    notes: "K-quant mixed 4/6-bit; effective ~4.9 bits/weight, so larger than AWQ/GPTQ int4."
