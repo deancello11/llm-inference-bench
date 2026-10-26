@@ -3,7 +3,7 @@
 I recently took a machine learning course and an energy efficient computing course in college, and I wanted
 to build something that used what I learned in both. This project is the result. I wanted to know what you
 actually get when you shrink a language model. How much faster does it run, how much less energy does it use,
-and how much worse do its answers get? To find out, I ran Qwen2.5-3B-Instruct on a single RTX 4090 in 9 different
+and how much worse do its answers get? To find out, I rented and ran Qwen2.5-3B-Instruct on a single RTX 4090 in 9 different
 setups and measured all three.
 
 The short version: 4-bit models generate text about 3x faster than the 16-bit Hugging Face baseline and use about
