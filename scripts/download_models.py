@@ -12,8 +12,9 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from huggingface_hub import hf_hub_download, snapshot_download  # noqa: E402
+from huggingface_hub import snapshot_download  # noqa: E402
 
+from bench.adapters.llamacpp import gguf_shards  # noqa: E402
 from bench.config import load_matrix  # noqa: E402
 
 
@@ -26,7 +27,7 @@ def main():
             continue
         print(f"-> {c.id}: {c.checkpoint} {c.file or ''}")
         if c.file:
-            hf_hub_download(c.checkpoint, c.file)
+            gguf_shards(c)
         else:
             snapshot_download(c.checkpoint, allow_patterns=["*.safetensors", "*.json", "*.txt", "*.model"])
 

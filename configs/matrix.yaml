@@ -71,7 +71,7 @@ configs:
     stack: llamacpp
     precision: gguf-f16
     checkpoint: Qwen/Qwen2.5-3B-Instruct-GGUF
-    file: qwen2.5-3b-instruct-fp16.gguf
+    file: qwen2.5-3b-instruct-fp16-00001-of-00002.gguf   # split GGUF; the adapter fetches all shards
     notes: "Extra config (not in the original 8): same-precision comparison against HF/vLLM FP16."
 
   - id: llamacpp-q8

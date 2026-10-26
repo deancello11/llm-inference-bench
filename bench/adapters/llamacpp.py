@@ -38,10 +38,24 @@ def find_binary(name: str, env_var: str) -> str:
     raise FileNotFoundError(f"{name} not found. Build llama.cpp (scripts/setup_envs.sh) or set ${env_var}.")
 
 
-def gguf_path(cfg) -> str:
+_SHARD = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
+
+
+def gguf_shards(cfg) -> list[str]:
+    """Local paths of every GGUF file for this config (split models like -00001-of-00002)."""
     from huggingface_hub import hf_hub_download
 
-    return hf_hub_download(cfg.checkpoint, cfg.file)
+    names = [cfg.file]
+    m = _SHARD.search(cfg.file)
+    if m:
+        total = int(m.group(2))
+        names = [f"{cfg.file[:m.start()]}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+    return [hf_hub_download(cfg.checkpoint, n) for n in names]
+
+
+def gguf_path(cfg) -> str:
+    """Path to hand llama.cpp: the first shard (it locates the rest next to it)."""
+    return gguf_shards(cfg)[0]
 
 
 class LlamaCppAdapter(Adapter):
@@ -49,13 +63,14 @@ class LlamaCppAdapter(Adapter):
 
     def load(self) -> None:
         self.server_bin = find_binary("llama-server", "LLAMA_SERVER_BIN")
-        self.model_path = gguf_path(self.cfg)
+        shards = gguf_shards(self.cfg)
+        self.model_path = shards[0]
         self.proc: subprocess.Popen | None = None
         self.parallel = 0
         self.log_dir = pathlib.Path(RESULTS_DIR) / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.load_info = {
-            "weights_bytes": os.path.getsize(self.model_path),
+            "weights_bytes": sum(os.path.getsize(p) for p in shards),
             "gguf_file": self.cfg.file,
             "server_bin": self.server_bin,
         }
