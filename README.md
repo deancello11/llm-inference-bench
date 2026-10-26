@@ -43,9 +43,8 @@ python -m bench.run_config --config hf-fp16 --workloads short --concurrency 1 --
 python scripts/zeus_crosscheck.py              # energy validation (HF env, pip install zeus)
 python -m bench.quality.run_quality --config hf-fp16 --tasks arc --limit 50                 # smoke test, then drop --limit
 python -m bench.run_matrix --rounds 3 --repeats-per-load 2                                  # the full grid, resumable
-# quality for every config (one call each):
-for c in $(python -c "from bench.config import load_matrix as l;print(*[c.id for c in l().enabled()])"); do
-  python -m bench.quality.run_quality --config $c; done
+# quality for every config, each with its own stack's python (run after the matrix; it uses the GPU):
+bash scripts/run_quality_all.sh
 # on your laptop:
 pip install -r requirements/analysis.txt && python -m analysis.make_charts   # add --energy idle_sub for idle-subtracted
 ```
