@@ -62,7 +62,9 @@ def main():
             print("$", " ".join(cmd))
             if args.dry_run:
                 continue
-            rc = subprocess.run(cmd).returncode
+            # venv not activated: put its bin/ on PATH so JIT builds (vLLM/FlashInfer) find ninja
+            env = {**os.environ, "PATH": os.path.dirname(cmd[0]) + os.pathsep + os.environ.get("PATH", "")}
+            rc = subprocess.run(cmd, env=env).returncode
             if rc != 0:
                 append_jsonl(fails_f, {"ts": now_iso(), "config_id": cid, "round": rnd,
                                        "stage": "process", "error": f"exit code {rc}"})

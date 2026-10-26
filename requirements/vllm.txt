@@ -1,1 +1,2 @@
 vllm          # pulls its own pinned torch; keep this venv separate
+ninja         # FlashInfer JIT-builds its sampler kernel at startup; needs ninja on PATH

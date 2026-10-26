@@ -6,3 +6,6 @@ data/
 *.gguf
 results/logs/
 .pytest_cache/
+pod_logs/
+logs/
+results_smoke/
