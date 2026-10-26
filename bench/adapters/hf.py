@@ -1,7 +1,7 @@
 """Hugging Face Transformers adapter (FP16, bitsandbytes INT8, bitsandbytes NF4).
 
-Concurrency = one *static* batch of N equal-length prompts. Transformers has no
-continuous batching, which is part of what this benchmark shows.
+For concurrency N, we send one fixed batch of N prompts of the same length. Transformers
+can't add new requests to a running batch, which is part of what this benchmark shows.
 """
 from __future__ import annotations
 
@@ -33,14 +33,14 @@ class HFAdapter(Adapter):
         kw = dict(device_map={"": 0}, quantization_config=qcfg, attn_implementation="sdpa")
         try:
             self.model = AutoModelForCausalLM.from_pretrained(c.checkpoint, dtype=torch.float16, **kw)
-        except TypeError:  # older transformers
+        except TypeError:  # older transformers versions call this argument torch_dtype
             self.model = AutoModelForCausalLM.from_pretrained(c.checkpoint, torch_dtype=torch.float16, **kw)
         self.model.eval()
         self.tok = AutoTokenizer.from_pretrained(c.tokenizer)
         self.pad_id = self.tok.pad_token_id if self.tok.pad_token_id is not None else self.tok.eos_token_id
         self.load_info = {"weights_bytes": int(self.model.get_memory_footprint())}
 
-    # ---- benchmark path ----------------------------------------------------------
+    # ---- speed test --------------------------------------------------------------
     def generate(self, prompts, max_new_tokens, keep_text=False):
         torch = self.torch
         from transformers import LogitsProcessor, LogitsProcessorList
@@ -48,8 +48,11 @@ class HFAdapter(Adapter):
         stamps: list[float] = []
 
         class StepTimer(LogitsProcessor):
-            """Called once per decode step, right after that step's forward pass.
-            First call = end of prefill => TTFT. Synchronize so timestamps are real."""
+            """Records the time after every generation step.
+
+            The first stamp is the end of prompt processing, which gives the time to first
+            token. We wait for the GPU to finish first so the time is real.
+            """
 
             def __call__(self, input_ids, scores):
                 torch.cuda.synchronize()
@@ -65,7 +68,7 @@ class HFAdapter(Adapter):
                 input_ids=ids,
                 attention_mask=attn,
                 max_new_tokens=max_new_tokens,
-                min_new_tokens=max_new_tokens,   # suppresses EOS => exact length
+                min_new_tokens=max_new_tokens,   # blocks the end-of-text token so the length is exact
                 do_sample=False,
                 temperature=None, top_p=None, top_k=None, repetition_penalty=1.0,
                 pad_token_id=self.pad_id,
@@ -89,7 +92,7 @@ class HFAdapter(Adapter):
             "torch_peak_reserved_mib": t.max_memory_reserved() / 2**20,
         }
 
-    # ---- quality path ------------------------------------------------------------
+    # ---- quality tests -----------------------------------------------------------
     def score_windows(self, windows):
         torch = self.torch
         import torch.nn.functional as F

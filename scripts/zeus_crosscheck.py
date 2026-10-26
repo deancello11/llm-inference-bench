@@ -1,11 +1,10 @@
-"""Cross-check our energy numbers against the Zeus library (ML.ENERGY project).
+"""Compares our energy numbers with the Zeus library (from the ML.ENERGY project).
 
     python scripts/zeus_crosscheck.py --config hf-fp16 --tokens 256 --batch 1
 
-Runs the same generation inside one window measured by BOTH our GpuMonitor and
-zeus.monitor.ZeusMonitor, and prints the relative difference. They should agree within a
-few percent (both read the NVML counter); a big gap means a bug in one of the two.
-Needs `pip install zeus` (package name: zeus-ml on older releases) in the HF environment.
+It generates text once while both our GpuMonitor and Zeus measure the energy, then prints
+how far apart they are. They should be within a few percent. A big gap means one of them
+has a bug. Needs `pip install zeus` in the Hugging Face environment (older releases call it zeus-ml).
 """
 from __future__ import annotations
 

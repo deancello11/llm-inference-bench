@@ -1,9 +1,9 @@
-# The experiment matrix. Everything the benchmark runs is declared here.
-# Add/remove configs by editing this file; no code changes needed.
+# This file defines the whole experiment: which model, which configs, and what to measure.
+# To add or remove a config, edit this file. No code changes are needed.
 
 model:
   name: Qwen2.5-3B-Instruct
-  tokenizer: Qwen/Qwen2.5-3B-Instruct   # all stacks share this tokenizer's token ids
+  tokenizer: Qwen/Qwen2.5-3B-Instruct   # every stack uses this tokenizer, so token ids match
 
 workloads:
   short: {input_len: 128,  output_len: 256}
@@ -12,16 +12,16 @@ workloads:
 concurrency: [1, 8, 32]
 
 settings:
-  # vLLM preallocates this fraction of GPU memory for weights + KV cache, so its
-  # raw "VRAM used" is a setting, not a measurement. We report weight bytes and
-  # KV-cache capacity separately (see README, "Memory methodology").
+  # vLLM grabs this fraction of GPU memory up front for the model and its KV cache. So the
+  # memory it shows as "used" is a setting, not a measurement. We report the model's size and
+  # the KV cache size separately instead (see "Memory" in the README).
   vllm_gpu_memory_utilization: 0.60
   vllm_max_model_len: 4096
   vllm_max_num_seqs: 64
-  # llama-server splits --ctx-size across --parallel slots; each slot gets this many tokens.
+  # llama.cpp splits its context across parallel slots. Each slot gets this many tokens.
   llamacpp_slot_ctx: 2048
-  llamacpp_ngl: 99
-  # Idle-power baseline measured after model load, before any timed run.
+  llamacpp_ngl: 99          # number of layers to put on the GPU (99 means all of them)
+  # How long to measure idle power after the model is loaded, before any timed run.
   idle_seconds: 20
 
 configs:

@@ -1,13 +1,13 @@
-"""WikiText-2 perplexity with an identical protocol across HF and vLLM.
+"""Perplexity on WikiText-2 (lower is better). It measures how well a model predicts real text.
 
-Protocol: tokenize the raw test split joined with "\\n\\n", cut into NON-overlapping
-windows of `ctx` tokens (default 2048), drop the incomplete tail, score tokens 1..ctx-1 of
-each window. (Non-overlapping => a bit higher PPL than a strided sliding window, but the
-same for every config.)
+How it works for Hugging Face and vLLM: join the test text, cut it into separate 2048-token
+chunks, drop the leftover piece at the end, and score every token in each chunk. Using
+separate chunks gives a slightly higher number than a sliding window would, but it is the
+same for every config, so the comparison is fair.
 
-llama.cpp is scored with its own `llama-perplexity` binary, whose chunking/scoring differs
-(it scores only the second half of each window by default). So llama.cpp numbers are only
-comparable *within llama.cpp* (use llamacpp-f16 as that stack's reference).
+llama.cpp is scored with its own `llama-perplexity` program, which scores differently (only
+the second half of each chunk). So llama.cpp numbers should only be compared with other
+llama.cpp numbers. Use llamacpp-f16 as its reference.
 """
 from __future__ import annotations
 

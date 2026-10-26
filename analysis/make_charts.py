@@ -1,10 +1,10 @@
-"""Turn raw JSONL results into the summary table and all charts.
+"""Turns the raw results into a summary table and all the charts.
 
     python -m analysis.make_charts --results results --out results/charts
 
-Run on your laptop with the saved raw data (needs pandas + matplotlib only).
-Energy is GPU-board energy from the NVML counter. Use --energy idle_sub for idle-subtracted
-energy (E - idle_power * duration); the chart titles always say which one is plotted.
+Runs on a laptop from the saved result files (needs pandas and matplotlib only).
+Energy is the GPU board's energy from the NVML counter. Add --energy idle_sub to subtract the
+idle power first (energy - idle_power * time). Each chart label says which one it shows.
 """
 from __future__ import annotations
 
@@ -20,18 +20,28 @@ import pandas as pd  # noqa: E402
 from bench.io_utils import read_jsonl  # noqa: E402
 from bench.stats import pareto_frontier  # noqa: E402
 
-# Reference palette (dataviz skill): categorical slots 1-3 = one hue per serving STACK.
+# One color for each serving stack.
 STACK_COLOR = {"hf": "#2a78d6", "vllm": "#eb6834", "llamacpp": "#1baf7a"}
 STACK_LABEL = {"hf": "Hugging Face", "vllm": "vLLM", "llamacpp": "llama.cpp"}
-# Marker = precision family, so identity never relies on colour alone.
+# The marker shape shows the precision, so the charts don't depend on color alone.
 MARKER = {"fp16": "o", "gguf-f16": "o", "int8-bnb": "s", "gguf-q8_0": "s",
           "nf4-bnb": "^", "awq-int4": "^", "gptq-int4": "D", "gguf-q4_k_m": "^"}
 INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e5e4e0", "#fcfcfb"
-OFFSETS = [(7, 6, "left"), (7, -13, "left"), (-7, 6, "right"), (-7, -13, "right")]  # de-collide labels
+OFFSETS = [(7, 6, "left"), (7, -13, "left"), (-7, 6, "right"), (-7, -13, "right")]  # label positions to rotate through
+# Where to put each config's label on the Pareto chart: (x shift, y shift, alignment).
+# Picked by hand so labels of nearby points (awq and gptq, q8 and vllm-fp16) don't overlap.
+# A config that isn't listed here just rotates through OFFSETS.
+LABEL_POS = {
+    "hf-fp16": (7, 6, "left"), "vllm-fp16": (-7, 8, "right"), "llamacpp-f16": (7, -13, "left"),
+    "llamacpp-q8": (-9, 6, "right"), "llamacpp-q4km": (7, 6, "left"),
+    "vllm-awq": (7, 6, "left"), "vllm-gptq": (-7, -13, "right"),
+    "hf-int8-bnb": (7, -13, "left"), "hf-nf4-bnb": (-7, 6, "right"),
+}
 BANDWIDTH_GBS = 1008.0  # RTX 4090 peak memory bandwidth
 
 
 def style(ax, xlabel, ylabel, title):
+    """Give every chart the same look: light grid, no top/right border, left-aligned title."""
     ax.set_facecolor(SURFACE)
     ax.set_xlabel(xlabel, color=INK2)
     ax.set_ylabel(ylabel, color=INK2)
@@ -51,13 +61,15 @@ def new_fig(w=7.5, h=4.8, ncols=1):
 
 
 def stack_legend(ax, loc="best"):
+    """A small legend that maps each color to a serving stack."""
     handles = [plt.Line2D([], [], color=c, marker="o", linestyle="-", label=STACK_LABEL[s])
                for s, c in STACK_COLOR.items()]
     ax.legend(handles=handles, frameon=False, labelcolor=INK2, loc=loc, fontsize=9)
 
 
-# ------------------------------------------------------------------ data ---------
+# ------------------------------------------------------------------ loading data ---
 def load(results: pathlib.Path, energy: str):
+    """Read the result files and return (every run, one row per cell with the median, quality table)."""
     runs = pd.DataFrame(read_jsonl(results / "runs.jsonl"))
     loads = pd.DataFrame(read_jsonl(results / "loads.jsonl"))
     qual = pd.DataFrame(read_jsonl(results / "quality.jsonl"))
@@ -71,7 +83,7 @@ def load(results: pathlib.Path, energy: str):
            "energy_per_token_mj", "mem_delta_peak_mib", "power_mean_w", "sm_clock_mean_mhz", "temp_max_c"]
     agg = runs.groupby(keys).agg({**{c: "median" for c in num}, "is_throttled": "sum", "repeat": "count"}) \
               .rename(columns={"repeat": "n_windows", "is_throttled": "n_throttled"}).reset_index()
-    # run-to-run spread of the headline metric
+    # how much the repeats of the same cell differ from each other
     spread = runs.groupby(keys)["decode_tps_per_request"].agg(lambda s: (s.max() - s.min()) / s.median()).rename("tps_spread")
     agg = agg.merge(spread.reset_index(), on=keys)
 
@@ -99,11 +111,13 @@ def load(results: pathlib.Path, energy: str):
 
 
 def pick(agg, wl, conc):
+    """The rows for one workload and one concurrency level."""
     return agg[(agg.workload == wl) & (agg.concurrency == conc)].copy()
 
 
-# ------------------------------------------------------------------ charts -------
+# ------------------------------------------------------------------ charts ---------
 def chart_pareto(agg, q, out, energy_label, wl="short", concs=(1, 32)):
+    """Accuracy against energy per token, one dot per config. The dashed line joins the best trade-offs."""
     if q.empty or "acc_mean" not in q:
         print("skip pareto: no quality results yet")
         return
@@ -121,7 +135,7 @@ def chart_pareto(agg, q, out, energy_label, wl="short", concs=(1, 32)):
         for i, r in enumerate(d.itertuples()):
             ax.scatter(r.energy_per_token_mj, r.acc_mean * 100, s=70, color=STACK_COLOR[r.stack],
                        marker=MARKER.get(r.precision, "o"), edgecolor=SURFACE, linewidth=1.5, zorder=3)
-            dx, dy, ha = OFFSETS[i % len(OFFSETS)]
+            dx, dy, ha = LABEL_POS.get(r.config_id, OFFSETS[i % len(OFFSETS)])
             ax.annotate(r.config_id, (r.energy_per_token_mj, r.acc_mean * 100), textcoords="offset points",
                         xytext=(dx, dy), ha=ha, fontsize=8, color=INK2)
         style(ax, f"mJ per generated token, {energy_label} (lower is better)",
@@ -134,16 +148,42 @@ def chart_pareto(agg, q, out, energy_label, wl="short", concs=(1, 32)):
     plt.close(fig)
 
 
+def plain_log_yticks(ax):
+    """Label a log-scale y-axis at 1, 2, 5, 10, 20, 50... as plain numbers (matplotlib shows only 10, 100, 1000)."""
+    lo, hi = ax.get_ylim()
+    ticks = [m * 10 ** k for k in range(-1, 8) for m in (1, 2, 5) if lo <= m * 10 ** k <= hi]
+    ax.set_yticks(ticks)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+
+
+def label_line_ends(fig, ax, items, min_gap_pt=11.0):
+    """Write each line's name at its right end, nudging labels apart so they don't overlap."""
+    fig.canvas.draw()  # draw once so the axis limits are final before we convert positions
+    # (name, x, y, vertical pixel position), sorted from bottom to top
+    px = [(name, x, y, ax.transData.transform((x, y))[1]) for name, x, y in items]
+    px.sort(key=lambda t: t[3])
+    gap = min_gap_pt * fig.dpi / 72.0
+    pos = []
+    for _, _, _, py in px:
+        pos.append(py if not pos else max(py, pos[-1] + gap))
+    shift = (sum(p - t[3] for p, t in zip(pos, px)) / len(px))  # center the group so it isn't pushed upward
+    for (name, x, y, py), p in zip(px, pos):
+        ax.annotate(name, (x, y), textcoords="offset points", xytext=(6, (p - shift - py) * 72.0 / fig.dpi),
+                    fontsize=8, color=INK2, va="center")
+
+
 def _lines(agg, out, name, ycol, ylabel, title, wl="short", logy=False, x="concurrency"):
+    """One line per config showing how a metric changes as concurrency goes up."""
     fig, ax = new_fig()
     d = agg[agg.workload == wl]
+    ends = []
     for cid, g in d.groupby("config_id"):
         g = g.sort_values(x)
         r = g.iloc[0]
         ax.plot(g[x], g[ycol], color=STACK_COLOR[r["stack"]], marker=MARKER.get(r.precision, "o"),
                 linewidth=2, markersize=7, markeredgecolor=SURFACE, markeredgewidth=1.2)
-        ax.annotate(cid, (g[x].iloc[-1], g[ycol].iloc[-1]), textcoords="offset points", xytext=(6, 0),
-                    fontsize=8, color=INK2, va="center")
+        ends.append((cid, g[x].iloc[-1], g[ycol].iloc[-1]))
     if x == "concurrency":
         ax.set_xscale("log", base=2)
         ax.set_xticks(sorted(d.concurrency.unique()))
@@ -154,20 +194,25 @@ def _lines(agg, out, name, ycol, ylabel, title, wl="short", logy=False, x="concu
     style(ax, "Concurrent requests" if x == "concurrency" else x, ylabel, title)
     stack_legend(ax, "upper left")
     fig.tight_layout()
+    if logy:
+        fig.canvas.draw()
+        plain_log_yticks(ax)
+    label_line_ends(fig, ax, ends)
     fig.savefig(out / f"{name}.png", dpi=170)
     plt.close(fig)
 
 
 def chart_ttft_vs_input(agg, out):
+    """Time to first token for short and long prompts. This is the cost of reading the prompt."""
     fig, ax = new_fig()
     d = agg[agg.concurrency == 1]
+    ends = []
     for cid, g in d.groupby("config_id"):
         g = g.sort_values("input_len")
         r = g.iloc[0]
         ax.plot(g.input_len, g.ttft_mean_s * 1000, color=STACK_COLOR[r["stack"]], marker=MARKER.get(r.precision, "o"),
                 linewidth=2, markersize=7, markeredgecolor=SURFACE, markeredgewidth=1.2)
-        ax.annotate(cid, (g.input_len.iloc[-1], g.ttft_mean_s.iloc[-1] * 1000), textcoords="offset points",
-                    xytext=(6, 0), fontsize=8, color=INK2, va="center")
+        ends.append((cid, g.input_len.iloc[-1], g.ttft_mean_s.iloc[-1] * 1000))
     ax.set_xscale("log", base=2)
     ax.set_xticks(sorted(d.input_len.unique()))
     ax.get_xaxis().set_major_formatter(matplotlib.ticker.ScalarFormatter())
@@ -176,11 +221,15 @@ def chart_ttft_vs_input(agg, out):
     style(ax, "Input length (tokens)", "Time to first token, ms (log)", "Prefill cost: TTFT vs input length (concurrency 1)")
     stack_legend(ax, "upper left")
     fig.tight_layout()
+    fig.canvas.draw()
+    plain_log_yticks(ax)
+    label_line_ends(fig, ax, ends)
     fig.savefig(out / "ttft_vs_input.png", dpi=170)
     plt.close(fig)
 
 
 def chart_memory(agg, out):
+    """Bar chart of the model's weight size for each config."""
     if "weights_bytes" not in agg:
         return
     d = agg[(agg.workload == "short") & (agg.concurrency == 1)].sort_values("weights_bytes")
@@ -202,6 +251,11 @@ def chart_memory(agg, out):
 
 
 def chart_roofline(agg, out):
+    """Measured speed against the speed limit set by memory bandwidth.
+
+    The limit is the GPU's bandwidth divided by the model size, because for every token
+    the GPU has to read the whole model from memory once.
+    """
     if "weights_bytes" not in agg:
         return
     d = agg[(agg.workload == "short") & (agg.concurrency == 1)].sort_values("weights_bytes", ascending=False)
@@ -224,6 +278,7 @@ def chart_roofline(agg, out):
 
 
 def write_summary(agg, q, out):
+    """Save every cell as summary.csv, plus a small markdown table for the README."""
     d = agg.copy()
     if not q.empty:
         d = d.merge(q, on="config_id", how="left")

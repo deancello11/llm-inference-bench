@@ -1,9 +1,9 @@
-"""Quality evals for one config.
+"""Runs the quality tests (perplexity and accuracy) for one config.
 
     python -m bench.quality.run_quality --config vllm-awq --tasks ppl,arc,mmlu,hellaswag
-    python -m bench.quality.run_quality --config hf-fp16 --tasks arc --limit 50      # smoke test
+    python -m bench.quality.run_quality --config hf-fp16 --tasks arc --limit 50      # quick test
 
-Results are appended to results/quality.jsonl (one row per config x task).
+Each result is added to results/quality.jsonl, one line per config and task.
 """
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ def main():
     ap.add_argument("--matrix", default=str(DEFAULT_MATRIX))
     ap.add_argument("--config", required=True)
     ap.add_argument("--tasks", default="ppl,arc,mmlu,hellaswag")
-    ap.add_argument("--limit", type=int, default=None, help="cap items per task (smoke tests)")
+    ap.add_argument("--limit", type=int, default=None, help="only use this many items per task (for quick tests)")
     ap.add_argument("--ppl-ctx", type=int, default=2048)
-    ap.add_argument("--determinism-check", action="store_true", help="score the first 100 ARC items twice")
+    ap.add_argument("--determinism-check", action="store_true", help="score the first 100 ARC items twice and compare")
     ap.add_argument("--out-dir", default=None)
     args = ap.parse_args()
 
@@ -41,7 +41,7 @@ def main():
         print(f"[{cfg.id}] {task}: " + ", ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
                                                   for k, v in payload.items()))
 
-    # llama.cpp perplexity uses its own binary and must run before the server holds the GPU.
+    # llama.cpp perplexity uses its own program, so run it first, before our server takes the GPU.
     if "ppl" in tasks and cfg.stack == "llamacpp":
         emit("ppl", perplexity.run_llamacpp_ppl(cfg, args.ppl_ctx))
         tasks = [t for t in tasks if t != "ppl"]

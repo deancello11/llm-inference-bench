@@ -1,15 +1,15 @@
-"""Run the whole grid unattended, resumable, with interleaved ordering.
+"""Runs every config, workload and concurrency level, with no one watching.
 
     python -m bench.run_matrix --rounds 3 --repeats-per-load 2 --out-dir results
 
-Total repeats per cell = rounds x repeats-per-load. Each round visits every config in a
-fresh random order, loading each model once and measuring `repeats-per-load` windows per
-cell. Spreading repeats over rounds means slow thermal drift or a noisy neighbour hits all
-stacks equally instead of biasing whichever ran last.
+Repeats per cell = rounds x repeats-per-load. In each round every config is run once, in a
+new random order. The repeats are spread across rounds so that slow changes (a warming GPU,
+a busy neighbor on the machine) affect all stacks equally and don't favor whichever ran last.
 
-Each stack can use its own virtualenv (vLLM pins its own torch). Point at them with
-BENCH_PY_HF, BENCH_PY_VLLM, BENCH_PY_LLAMACPP (default: this interpreter).
-Safe to Ctrl-C / kill the pod and re-run: finished windows are skipped.
+Each stack can use its own virtualenv, because vLLM needs its own version of torch. Point to
+them with the BENCH_PY_HF, BENCH_PY_VLLM and BENCH_PY_LLAMACPP environment variables.
+
+It is safe to stop this at any time and start it again. Finished runs are skipped.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from .io_utils import append_jsonl, now_iso, results_path
 
 
 def stack_python(stack: str) -> str:
+    """The Python interpreter to use for a stack (its own venv if one is set)."""
     return os.environ.get(f"BENCH_PY_{stack.upper()}", sys.executable)
 
 
@@ -62,14 +63,15 @@ def main():
             print("$", " ".join(cmd))
             if args.dry_run:
                 continue
-            # venv not activated: put its bin/ on PATH so JIT builds (vLLM/FlashInfer) find ninja
+            # We call the venv's python directly, so add its bin folder to PATH.
+            # vLLM needs the `ninja` tool from there to build a small GPU kernel.
             env = {**os.environ, "PATH": os.path.dirname(cmd[0]) + os.pathsep + os.environ.get("PATH", "")}
             rc = subprocess.run(cmd, env=env).returncode
-            if rc != 0:
+            if rc != 0:  # a failed config is saved as a finding and we keep going
                 append_jsonl(fails_f, {"ts": now_iso(), "config_id": cid, "round": rnd,
                                        "stage": "process", "error": f"exit code {rc}"})
                 print(f"!! {cid} round {rnd} exited with {rc} (logged; continuing)")
-            time.sleep(args.gpu_cooldown_s)
+            time.sleep(args.gpu_cooldown_s)  # let the GPU rest and free its memory before the next config
 
 
 if __name__ == "__main__":

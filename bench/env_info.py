@@ -1,4 +1,4 @@
-"""Record the software/hardware environment alongside results (results depend on it)."""
+"""Saves the software and hardware versions next to the results, since speeds depend on them."""
 from __future__ import annotations
 
 import importlib.metadata as md
@@ -8,6 +8,7 @@ import sys
 
 from .config import ROOT
 
+# Packages whose versions we record, if they are installed in the current environment.
 PACKAGES = [
     "torch", "transformers", "bitsandbytes", "vllm", "accelerate", "autoawq",
     "auto-gptq", "gptqmodel", "llama-cpp-python", "nvidia-ml-py", "lm_eval",
@@ -16,6 +17,7 @@ PACKAGES = [
 
 
 def _run(cmd: list[str]) -> str | None:
+    """Run a command and return its output, or None if it fails."""
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
@@ -38,9 +40,9 @@ def collect_env() -> dict:
                             "--format=csv,noheader"]),
     }
     try:
-        import torch  # noqa: WPS433 - optional
+        import torch  # only some environments have torch
         env["torch_cuda"] = torch.version.cuda
         env["cudnn"] = torch.backends.cudnn.version()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return env

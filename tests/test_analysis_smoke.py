@@ -1,11 +1,12 @@
-"""Generate synthetic results and make sure the chart pipeline runs end to end."""
+"""Makes fake results and checks that the chart code runs from start to finish."""
 import json
 import random
 
-from analysis.make_charts import load, main  # noqa: F401
+from analysis.make_charts import main
 from bench.config import load_matrix
 
-# (decode tok/s at c=1, weight GB, accuracy, ppl, mJ/token at c=1)
+# Made-up numbers for each config:
+# (decode tok/s at c=1, weight GB, accuracy, perplexity, mJ/token at c=1)
 FAKE = {
     "hf-fp16": (60, 6.2, 0.70, 8.1, 900), "hf-int8-bnb": (20, 3.5, 0.69, 8.2, 2500),
     "hf-nf4-bnb": (45, 2.2, 0.66, 8.8, 1100), "vllm-fp16": (140, 6.2, 0.70, 8.1, 400),

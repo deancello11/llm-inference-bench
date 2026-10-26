@@ -5,4 +5,4 @@ httpx
 huggingface_hub
 datasets
 transformers
-jinja2        # tokenizer chat templates; not pulled in by transformers alone (no torch in the llama.cpp venv)
+jinja2        # needed for chat templates; the llama.cpp venv has no torch, which normally brings it in

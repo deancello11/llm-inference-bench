@@ -1,11 +1,11 @@
-"""Measure ONE config across workloads x concurrency x repeats.
+"""Measures one config across all workloads, concurrency levels and repeats.
 
     python -m bench.run_config --config hf-fp16 --repeats 3
 
-Each repeat is one "measurement window": the generate() call is run back-to-back until
-the window lasts at least --min-window-s (default 10 s) so the energy reading is stable,
-and latency stats are pooled over every request in the window. One JSON line is written
-per window, with the config attached. Finished windows are skipped on re-run (resumable).
+Each repeat is one "window". Inside a window we keep generating text, back to back, until
+at least --min-window-s seconds have passed (10 by default). A longer window gives a steadier
+energy reading. Latency is averaged over every request in the window. Each window is saved as
+one line of JSON, and windows that are already saved are skipped if you run this again.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from .workloads import make_prompts, seed_for
 
 
 def measure_window(adapter, monitor, wl, conc, round_idx, repeat, min_window_s, max_iters=50):
-    """One timed window: generate (possibly several times) while recording energy/clocks."""
+    """Run one timed window and return its latency, throughput and energy numbers."""
     adapter.reset_peak()
     results = []
     w = monitor.begin_window()
@@ -38,6 +38,7 @@ def measure_window(adapter, monitor, wl, conc, round_idx, repeat, min_window_s, 
             break
     g = monitor.end_window(w)
 
+    # Every request must produce exactly the requested number of tokens, or the comparison isn't fair.
     bad = [r.n_tokens for r in results if r.n_tokens != wl.output_len]
     if bad:
         raise RuntimeError(f"length mismatch: expected {wl.output_len} tokens, got {sorted(set(bad))}")
@@ -52,9 +53,9 @@ def measure_window(adapter, monitor, wl, conc, round_idx, repeat, min_window_s, 
         "ttft_p50_s": percentile(ttfts, 50),
         "ttft_p95_s": percentile(ttfts, 95),
         "e2e_mean_s": mean([r.e2e_s for r in results]),
-        "decode_tps_per_request": mean(decode_tps),           # 1 / inter-token latency
-        "itl_mean_ms": 1000.0 / mean(decode_tps),
-        "throughput_tps": total_tokens / g["duration_s"],       # aggregate, includes prefill
+        "decode_tps_per_request": mean(decode_tps),           # speed of one request after the first token
+        "itl_mean_ms": 1000.0 / mean(decode_tps),             # time between tokens
+        "throughput_tps": total_tokens / g["duration_s"],       # all requests together, includes prompt processing
         "energy_per_token_mj": 1000.0 * g["energy_j"] / total_tokens,
         **g,
         **adapter.extra_metrics(),
@@ -68,7 +69,7 @@ def main():
     ap.add_argument("--workloads", default=None, help="comma list; default all")
     ap.add_argument("--concurrency", default=None, help="comma list; default from matrix")
     ap.add_argument("--repeats", type=int, default=3)
-    ap.add_argument("--round", type=int, default=0, help="round index (matrix runner interleaves rounds)")
+    ap.add_argument("--round", type=int, default=0, help="round number (run_matrix sets this)")
     ap.add_argument("--warmup-iters", type=int, default=1)
     ap.add_argument("--min-window-s", type=float, default=10.0)
     ap.add_argument("--gpu-index", type=int, default=0)
@@ -86,36 +87,37 @@ def main():
     fails_f = results_path("failures.jsonl", args.out_dir)
     done = {run_key(r) for r in read_jsonl(runs_f)}
 
-    # cells still to do for this (config, round)
+    # A "cell" is one (workload, concurrency) pair. Only keep the ones with repeats left to do.
     cells = [(wn, c) for c in concs for wn in wl_names
              if any((cfg.id, wn, c, args.round, r) not in done for r in range(args.repeats))]
     if not cells:
         print(f"[{cfg.id}] round {args.round}: nothing to do")
         return
     random.Random(args.seed * 1000 + args.round).shuffle(cells)
-    cells.sort(key=lambda x: x[1])  # group by concurrency (llama.cpp restarts per level); stable within group
+    # Group by concurrency, because llama.cpp has to restart its server for each level.
+    cells.sort(key=lambda x: x[1])
 
     monitor = GpuMonitor(args.gpu_index)
     monitor.start()
     info = monitor.info()
     print(f"[{cfg.id}] GPU: {info}")
     if info.get("mig_enabled"):
-        raise SystemExit("MIG is enabled: you do not have a full GPU. Change instance.")
+        raise SystemExit("MIG is enabled, so this is only a slice of a GPU. Use a different instance.")
     if not info["energy_counter"]:
-        print("WARNING: NVML energy counter unsupported; falling back to integrated power samples.")
+        print("WARNING: this GPU has no energy counter, so energy will come from power samples instead.")
 
     mem_baseline = monitor.mem_used_mib()
     adapter = make_adapter(cfg, matrix.settings)
     t0 = time.perf_counter()
     try:
         adapter.load()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # save why the load failed, then stop
         append_jsonl(fails_f, {"ts": now_iso(), "config_id": cfg.id, "stage": "load", "error": repr(e),
                                "trace": traceback.format_exc()})
         raise
     load_s = time.perf_counter() - t0
 
-    time.sleep(3)
+    time.sleep(3)  # let the GPU settle after loading
     idle_w = monitor.measure_idle_power_w(matrix.settings.get("idle_seconds", 20))
     append_jsonl(loads_f, {
         "ts": now_iso(), "config_id": cfg.id, "round": args.round, "load_s": load_s,
@@ -130,7 +132,7 @@ def main():
             wl = matrix.workloads[wn]
             try:
                 adapter.prepare(conc)
-                for wi in range(args.warmup_iters):  # discarded
+                for wi in range(args.warmup_iters):  # warmup runs are thrown away
                     adapter.generate(make_prompts(wl.input_len, conc, seed_for("warm", wn, conc, wi)), 32)
                 for rep in range(args.repeats):
                     if (cfg.id, wn, conc, args.round, rep) in done:
@@ -149,12 +151,12 @@ def main():
                           f"decode={m['decode_tps_per_request']:.1f} tok/s/req agg={m['throughput_tps']:.0f} tok/s "
                           f"E={m['energy_per_token_mj']:.1f} mJ/tok sm={m['sm_clock_mean_mhz']:.0f}MHz "
                           f"T={m['temp_max_c']:.0f}C{' THROTTLED' if m['thermal_throttled'] else ''}")
-            except Exception as e:  # noqa: BLE001  -- failures are findings; log and continue
+            except Exception as e:  # a failure is a result too: save it and move on
                 append_jsonl(fails_f, {"ts": now_iso(), "config_id": cfg.id, "workload": wn, "concurrency": conc,
                                        "round": args.round, "stage": "run", "error": repr(e),
                                        "trace": traceback.format_exc()})
                 print(f"[{cfg.id}] {wn} c={conc} FAILED: {e!r}")
-                if "CUDA error" in str(e):  # context is poisoned; stop this process
+                if "CUDA error" in str(e):  # after a CUDA error the GPU state is unreliable, so stop
                     break
     finally:
         adapter.close()

@@ -1,4 +1,7 @@
-"""Matrix config loading. Kept free of heavy imports so every venv can use it."""
+"""Loads the experiment settings from configs/matrix.yaml.
+
+This file only uses light imports so every virtualenv (HF, vLLM, llama.cpp) can use it.
+"""
 from __future__ import annotations
 
 import pathlib
@@ -16,19 +19,20 @@ STACKS = ("hf", "vllm", "llamacpp")
 @dataclass(frozen=True)
 class Workload:
     name: str
-    input_len: int
-    output_len: int
+    input_len: int    # prompt length in tokens
+    output_len: int   # tokens to generate
 
 
 @dataclass
 class ModelConfig:
+    """One row of the experiment: a model checkpoint run on one stack at one precision."""
     id: str
     stack: str
     precision: str
     checkpoint: str
     tokenizer: str
     quantization: str | None = None
-    file: str | None = None          # GGUF filename inside `checkpoint` repo
+    file: str | None = None          # GGUF file name inside the checkpoint repo (llama.cpp only)
     enabled: bool = True
     notes: str = ""
 

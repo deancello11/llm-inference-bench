@@ -1,8 +1,7 @@
-"""The one interface every serving stack implements.
+"""The interface every serving stack (Hugging Face, vLLM, llama.cpp) has to follow.
 
-The measurement harness only ever calls `generate()`, so all stacks go through
-identical timing/energy logic. Quality evals use `score_windows()` and
-`next_token_topk_batch()`.
+The benchmark only ever calls generate(), so all stacks are timed by the same code.
+The quality tests use score_windows() and next_token_topk_batch().
 """
 from __future__ import annotations
 
@@ -14,9 +13,9 @@ from ..config import ModelConfig
 
 @dataclass
 class GenResult:
-    ttft_s: float          # request start -> first generated token available
-    e2e_s: float           # request start -> last token
-    n_tokens: int          # generated tokens (must equal the requested output length)
+    ttft_s: float          # time from sending the request to the first generated token
+    e2e_s: float           # time from sending the request to the last token
+    n_tokens: int          # tokens generated (must equal the requested length)
     text: str | None = None
 
 
@@ -28,33 +27,34 @@ class Adapter(ABC):
 
     @abstractmethod
     def load(self) -> None:
-        """Load the model onto the GPU. Fill self.load_info (weights_bytes, etc.)."""
+        """Load the model onto the GPU and fill self.load_info (weight size, and so on)."""
 
     def prepare(self, concurrency: int) -> None:
-        """Called before each concurrency level (llama.cpp restarts its server here)."""
+        """Called before each concurrency level. llama.cpp restarts its server here."""
 
     @abstractmethod
     def generate(self, prompts: list[list[int]], max_new_tokens: int, keep_text: bool = False) -> list[GenResult]:
-        """Greedy-generate exactly max_new_tokens for each prompt *concurrently*.
+        """Generate exactly max_new_tokens for every prompt, all at the same time.
 
-        Must ignore EOS so every config produces the same number of tokens, must not
-        reuse cached prefixes, and must return only after the GPU work is complete.
+        Rules every stack must follow: greedy decoding, ignore the end-of-text token so all
+        runs have the same length, don't reuse cached prompts, and only return once the
+        GPU work is finished.
         """
 
     def reset_peak(self) -> None:
-        """Reset any stack-internal peak-memory counters."""
+        """Reset the stack's own peak-memory counter, if it has one."""
 
     def extra_metrics(self) -> dict:
         return {}
 
-    # ---- quality hooks -----------------------------------------------------------
+    # ---- used by the quality tests -----------------------------------------------
     def score_windows(self, windows: list[list[int]]) -> list[tuple[float, int]]:
-        """Per window: (sum of -log p over tokens 1..L-1, number of scored tokens)."""
+        """For each text window return (total negative log-likelihood, number of tokens scored)."""
         raise NotImplementedError(f"{type(self).__name__} has no perplexity scorer")
 
     def next_token_topk_batch(self, prompts: list[list[int]], k: int = 20) -> list[list[tuple[str, float]]]:
-        """For each prompt, the top-k (decoded token text, logprob) of the next token."""
+        """For each prompt return the k most likely next tokens as (text, log-probability)."""
         raise NotImplementedError(f"{type(self).__name__} has no next-token scorer")
 
     def close(self) -> None:
-        """Release the GPU."""
+        """Free the GPU."""

@@ -1,14 +1,15 @@
-"""Multiple-choice accuracy with ONE protocol shared by every stack.
+"""Multiple-choice accuracy, scored the same way on every stack.
 
-Each question is rendered as a zero-shot, letter-answer prompt wrapped in the model's chat
-template. The model's next-token log-probs over the letters A/B/C/D decide the answer. Only
-`adapter.next_token_topk_batch` is needed, so HF, vLLM and llama.cpp are scored identically
-(lm-evaluation-harness cannot score llama.cpp loglikelihoods reliably; see scripts/run_lm_eval.sh
-for an optional lm-eval cross-check on HF and vLLM).
+Each question is shown to the model with no examples, and the model must reply with a letter
+(A, B, C or D). We look at which letter it finds most likely as the next token. This only needs
+`adapter.next_token_topk_batch`, so Hugging Face, vLLM and llama.cpp are all scored identically.
+(EleutherAI's lm-evaluation-harness can't score llama.cpp reliably. scripts/run_lm_eval.sh
+is an optional extra check for HF and vLLM.)
 
-Tasks: ARC-Challenge (test), MMLU (seeded per-subject subsample), HellaSwag (seeded subsample).
-Absolute numbers will differ from leaderboard numbers (different prompting); the *deltas between
-configs* are what matter here.
+Tasks: ARC-Challenge (full test set), MMLU (20 questions per subject, random but fixed),
+and HellaSwag (1000 questions, random but fixed).
+Our numbers won't match public leaderboards because the prompts are different. What
+matters is the difference between configs.
 """
 from __future__ import annotations
 
@@ -23,9 +24,9 @@ INSTR = "Answer the following multiple choice question. Reply with only the lett
 
 @dataclass
 class Item:
-    text: str
+    text: str        # the full question with its answer options
     n_choices: int
-    gold: int
+    gold: int        # index of the correct answer
 
 
 def _fmt(question: str, choices: list[str]) -> str:
@@ -86,7 +87,7 @@ def evaluate(adapter, tokenizer, items: list[Item], batch: int = 64) -> dict:
                     j = LETTERS.index(t)
                     scores[j] = max(scores[j], lp)
             if max(scores) == float("-inf"):
-                no_letter += 1
+                no_letter += 1   # none of the answer letters were among the likely tokens
                 preds.append(-1)
             else:
                 preds.append(max(range(it.n_choices), key=scores.__getitem__))

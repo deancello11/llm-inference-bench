@@ -1,11 +1,12 @@
-"""NVML-based GPU monitor: energy counter, power/clock/temperature/memory sampling.
+"""Reads the GPU's energy, power, clock speed, temperature and memory using NVML.
 
-Energy is measured two independent ways over every timed window:
-  1. NVML's cumulative energy counter (nvmlDeviceGetTotalEnergyConsumption, mJ, Volta+).
-     Read immediately before and after the window. This is the primary number.
-  2. Trapezoidal integration of sampled instantaneous power (~10 Hz). Used as a
-     cross-check and as the fallback when the counter is unsupported.
-Scope is GPU board energy only: no CPU, DRAM, or wall power.
+Energy is measured two ways for every timed run:
+  1. NVML's built-in energy counter (in millijoules). We read it right before and right
+     after the run. This is the main number.
+  2. Power readings taken about 10 times a second, added up over time. This is a cross-check,
+     and the fallback if a GPU has no energy counter.
+
+This only measures the GPU board, not the CPU, RAM or the wall socket.
 """
 from __future__ import annotations
 
@@ -16,8 +17,8 @@ import pynvml
 
 from .stats import trapezoid_energy_j
 
-# Throttle-reason bits (nvml.h). We flag *thermal/hardware* slowdowns as invalidating;
-# plain software power-cap throttling is normal for a 4090 under load and is only logged.
+# Bits in NVML's "throttle reasons" number. Heat and hardware slowdowns make a run invalid.
+# The normal power-limit throttling on a 4090 under load is only logged, not flagged.
 HW_SLOWDOWN = 0x8
 SW_THERMAL = 0x20
 HW_THERMAL = 0x40
@@ -26,6 +27,7 @@ BAD_THROTTLE_MASK = HW_SLOWDOWN | SW_THERMAL | HW_THERMAL | HW_POWER_BRAKE
 
 
 def _s(x):
+    """Older pynvml returns bytes for strings, newer returns str."""
     return x.decode() if isinstance(x, bytes) else x
 
 
@@ -36,14 +38,15 @@ class GpuMonitor:
         self.h = pynvml.nvmlDeviceGetHandleByIndex(index)
         self.name = _s(pynvml.nvmlDeviceGetName(self.h))
         self.interval = interval_s
-        self._samples: list[tuple] = []  # (t, power_w, sm_mhz, temp_c, mem_used_mib, throttle)
+        self._samples: list[tuple] = []  # (time, power_w, sm_mhz, temp_c, mem_used_mib, throttle_bits)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.has_energy_counter = self._probe_energy()
 
-    # ---- raw reads -------------------------------------------------------------
+    # ---- reading the GPU ---------------------------------------------------------
     def _probe_energy(self) -> bool:
+        """Check whether this GPU has the energy counter (Volta and newer do)."""
         try:
             pynvml.nvmlDeviceGetTotalEnergyConsumption(self.h)
             return True
@@ -56,6 +59,7 @@ class GpuMonitor:
         return pynvml.nvmlDeviceGetTotalEnergyConsumption(self.h)
 
     def _throttle(self) -> int:
+        # The function was renamed in newer NVML versions, so try both names.
         for fn in ("nvmlDeviceGetCurrentClocksEventReasons", "nvmlDeviceGetCurrentClocksThrottleReasons"):
             f = getattr(pynvml, fn, None)
             if f:
@@ -72,10 +76,10 @@ class GpuMonitor:
             except pynvml.NVMLError:
                 return default
 
-        power = safe(lambda: pynvml.nvmlDeviceGetPowerUsage(self.h)) / 1000.0
+        power = safe(lambda: pynvml.nvmlDeviceGetPowerUsage(self.h)) / 1000.0   # mW -> W
         sm = safe(lambda: pynvml.nvmlDeviceGetClockInfo(self.h, pynvml.NVML_CLOCK_SM))
         temp = safe(lambda: pynvml.nvmlDeviceGetTemperature(self.h, pynvml.NVML_TEMPERATURE_GPU))
-        mem = safe(lambda: pynvml.nvmlDeviceGetMemoryInfo(self.h).used) / 2**20
+        mem = safe(lambda: pynvml.nvmlDeviceGetMemoryInfo(self.h).used) / 2**20  # bytes -> MiB
         return (time.perf_counter(), power, sm, temp, mem, self._throttle())
 
     def _append_sample(self) -> int:
@@ -84,8 +88,9 @@ class GpuMonitor:
             self._samples.append(s)
             return len(self._samples) - 1
 
-    # ---- sampler thread ----------------------------------------------------------
+    # ---- background sampling -----------------------------------------------------
     def start(self):
+        """Start a background thread that records a reading every `interval` seconds."""
         if self._thread:
             return
         self._stop.clear()
@@ -107,14 +112,16 @@ class GpuMonitor:
     def mem_used_mib(self) -> float:
         return pynvml.nvmlDeviceGetMemoryInfo(self.h).used / 2**20
 
-    # ---- measurement windows -----------------------------------------------------
+    # ---- timed windows -----------------------------------------------------------
     def begin_window(self) -> dict:
+        """Mark the start of a timed run. Pass the result to end_window()."""
         e0 = self.energy_mj()
         t0 = time.perf_counter()
         i0 = self._append_sample()
         return {"t0": t0, "e0": e0, "i0": i0}
 
     def end_window(self, w: dict) -> dict:
+        """Finish a timed run and return its energy, power, clocks, temperature and memory."""
         e1 = self.energy_mj()
         t1 = time.perf_counter()
         self._append_sample()
@@ -132,7 +139,7 @@ class GpuMonitor:
             "duration_s": dur,
             "energy_counter_j": e_cnt,
             "energy_integrated_j": e_int,
-            "energy_j": e_cnt if e_cnt is not None else e_int,
+            "energy_j": e_cnt if e_cnt is not None else e_int,   # prefer the counter
             "energy_source": "nvml_counter" if e_cnt is not None else "integrated_power",
             "power_mean_w": (e_cnt if e_cnt is not None else e_int) / dur if dur > 0 else float("nan"),
             "power_max_w": max(pw),
@@ -146,12 +153,13 @@ class GpuMonitor:
         }
 
     def measure_idle_power_w(self, seconds: float) -> float:
+        """Average power while the GPU sits idle."""
         w = self.begin_window()
         time.sleep(seconds)
         r = self.end_window(w)
         return r["power_mean_w"]
 
-    # ---- sanity info -------------------------------------------------------------
+    # ---- GPU details for the log -------------------------------------------------
     def info(self) -> dict:
         d = {"gpu_name": self.name, "energy_counter": self.has_energy_counter}
         try:
@@ -167,5 +175,5 @@ class GpuMonitor:
             cur, _pend = pynvml.nvmlDeviceGetMigMode(self.h)
             d["mig_enabled"] = bool(cur)
         except pynvml.NVMLError:
-            d["mig_enabled"] = False  # not supported => not a MIG-capable part
+            d["mig_enabled"] = False  # this GPU doesn't support MIG, so it can't be a MIG slice
         return d

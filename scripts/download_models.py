@@ -1,8 +1,8 @@
-"""Pre-download every checkpoint so the benchmark never measures a download.
+"""Downloads every model first, so a download never gets counted in the timings.
 
     python scripts/download_models.py [--only hf-fp16,vllm-awq]
 
-Put HF_HOME on persistent storage so a pod restart doesn't re-download.
+Set HF_HOME to a folder on persistent storage so a pod restart doesn't download everything again.
 """
 from __future__ import annotations
 

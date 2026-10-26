@@ -1,12 +1,12 @@
-"""llama.cpp adapter: drives `llama-server` (continuous batching via --parallel slots).
+"""llama.cpp adapter. It runs `llama-server` and sends it requests over HTTP.
 
-The server is (re)started whenever the concurrency level changes, with one slot per
-concurrent request. Prompts are sent as raw token ids so input length is exact, prefix
-caching is disabled per request, and EOS is ignored so output length is exact.
+The server is restarted whenever the concurrency level changes, with one slot for each
+simultaneous request. Prompts are sent as token ids so the length is exact, prompt caching is
+turned off, and the end-of-text token is ignored so every reply has the same length.
 
-Silent-failure guard: we refuse to benchmark unless GPU memory grew by about the model size
-after the server loads (a CPU-fallback llama.cpp looks 10x slower and is a classic
-benchmarking mistake).
+Safety check: llama.cpp quietly falls back to the CPU if the GPU isn't used, and then
+looks about 10x slower. So we refuse to benchmark unless GPU memory grew by roughly the
+size of the model after the server started.
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ def find_binary(name: str, env_var: str) -> str:
 
 
 def _gpu_used_mib() -> float:
+    """GPU memory currently in use, in MiB."""
     import pynvml
 
     pynvml.nvmlInit()
@@ -49,7 +50,10 @@ _SHARD = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
 
 
 def gguf_shards(cfg) -> list[str]:
-    """Local paths of every GGUF file for this config (split models like -00001-of-00002)."""
+    """Download the GGUF file(s) for this config and return their local paths.
+
+    Big models can be split into parts named like ...-00001-of-00002.gguf. We fetch all parts.
+    """
     from huggingface_hub import hf_hub_download
 
     names = [cfg.file]
@@ -61,7 +65,7 @@ def gguf_shards(cfg) -> list[str]:
 
 
 def gguf_path(cfg) -> str:
-    """Path to hand llama.cpp: the first shard (it locates the rest next to it)."""
+    """The path to give llama.cpp. For split models that is the first part, and it finds the rest."""
     return gguf_shards(cfg)[0]
 
 
@@ -82,7 +86,7 @@ class LlamaCppAdapter(Adapter):
             "server_bin": self.server_bin,
         }
 
-    # ---- server lifecycle --------------------------------------------------------
+    # ---- starting and stopping the server ----------------------------------------
     def _stop_server(self):
         if self.proc:
             self.proc.terminate()
@@ -91,7 +95,7 @@ class LlamaCppAdapter(Adapter):
             except subprocess.TimeoutExpired:
                 self.proc.kill()
             self.proc = None
-            time.sleep(2)  # let the driver release memory before the next load
+            time.sleep(2)  # give the GPU a moment to free its memory
 
     def _start_server(self, parallel: int):
         self._stop_server()
@@ -107,7 +111,7 @@ class LlamaCppAdapter(Adapter):
         ]
         self._log = open(log_path, "w", encoding="utf-8")
         self.proc = subprocess.Popen(cmd, stdout=self._log, stderr=subprocess.STDOUT)
-        deadline = time.time() + 300
+        deadline = time.time() + 300   # wait up to 5 minutes for the server to be ready
         while time.time() < deadline:
             if self.proc.poll() is not None:
                 raise RuntimeError(f"llama-server exited early; see {log_path}")
@@ -123,11 +127,11 @@ class LlamaCppAdapter(Adapter):
         self._check_gpu_offload(log_path, mem_before)
 
     def _check_gpu_offload(self, log_path: pathlib.Path, mem_before_mib: float):
-        """Refuse to benchmark unless the weights really landed on the GPU.
+        """Stop the run if the model did not really load onto the GPU.
 
-        Primary check is NVML device memory (independent of llama.cpp's log wording, which
-        changed between versions): it must have grown by >= 80% of the weight size. The
-        classic "offloaded N/N layers" log line is also checked when this build prints it.
+        Main check: GPU memory must have grown by at least 80% of the model size. This works
+        no matter how llama.cpp words its log lines, which change between versions.
+        If this build prints the old "offloaded N/N layers" line, we check that too.
         """
         text = log_path.read_text(encoding="utf-8", errors="replace")
         m = re.search(r"offloaded (\d+)/(\d+) layers to GPU", text)
@@ -147,7 +151,7 @@ class LlamaCppAdapter(Adapter):
         if self.parallel != concurrency:
             self._start_server(concurrency)
 
-    # ---- benchmark path ----------------------------------------------------------
+    # ---- speed test --------------------------------------------------------------
     def _one(self, prompt: list[int], n: int, t0: float, keep_text: bool) -> GenResult:
         body = {
             "prompt": prompt, "n_predict": n, "stream": True,
@@ -180,7 +184,7 @@ class LlamaCppAdapter(Adapter):
             futs = [ex.submit(self._one, p, max_new_tokens, t0, keep_text) for p in prompts]
             return [f.result() for f in futs]
 
-    # ---- quality path ------------------------------------------------------------
+    # ---- quality tests -----------------------------------------------------------
     def next_token_topk_batch(self, prompts, k=20):
         out = []
         with httpx.Client(timeout=120) as client:
@@ -190,9 +194,9 @@ class LlamaCppAdapter(Adapter):
                 r = client.post(f"http://127.0.0.1:{self.PORT}/completion", json=body)
                 r.raise_for_status()
                 cp = r.json()["completion_probabilities"][0]
-                if "top_logprobs" in cp:                       # newer servers
+                if "top_logprobs" in cp:                       # newer llama.cpp servers
                     out.append([(e["token"], e["logprob"]) for e in cp["top_logprobs"]])
-                else:                                          # older servers
+                else:                                          # older llama.cpp servers
                     import math
                     out.append([(e["tok_str"], math.log(max(e["prob"], 1e-30))) for e in cp["probs"]])
         return out

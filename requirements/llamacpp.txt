@@ -1,1 +1,1 @@
-# llama.cpp is a C++ binary (built by scripts/setup_envs.sh); only the client libs in common.txt are needed.
+# llama.cpp is a separate C++ program (scripts/setup_envs.sh builds it), so only the packages in common.txt are needed here.

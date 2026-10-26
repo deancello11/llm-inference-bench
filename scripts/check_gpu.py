@@ -1,10 +1,10 @@
-"""Phase 0 / Phase 3 gate: is this GPU instance usable for energy benchmarking?
+"""Checks that a rented GPU can be trusted for energy measurements. Run this first.
 
-    python scripts/check_gpu.py            # ~40 s
+    python scripts/check_gpu.py            # takes about 40 seconds
 
-Checks: full GPU (not MIG), NVML power is real and *changes* under load, the energy counter
-exists and agrees with integrated power samples. Run this on a rented pod BEFORE building
-anything else; if it fails, change provider.
+It checks that this is a full GPU (not a slice), that the power reading is real and goes up
+under load, that the energy counter exists, and that the counter agrees with the power
+readings. If any check fails, switch to a different pod or provider before doing anything else.
 """
 from __future__ import annotations
 

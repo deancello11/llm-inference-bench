@@ -1,4 +1,4 @@
-"""Append-only JSONL result files, resumable runs, checkpoint helpers."""
+"""Helpers for saving and reading results (one JSON record per line)."""
 from __future__ import annotations
 
 import json
@@ -16,7 +16,10 @@ def results_path(name: str, out_dir: pathlib.Path | None = None) -> pathlib.Path
 
 
 def append_jsonl(path: pathlib.Path, record: dict) -> None:
-    """Append one record and fsync so a crash/pod-kill never loses finished runs."""
+    """Add one record to the end of the file and force it to disk.
+
+    If the pod crashes, every finished run is already saved.
+    """
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, default=str) + "\n")
         f.flush()
@@ -34,7 +37,7 @@ def read_jsonl(path: pathlib.Path) -> list[dict]:
                 try:
                     out.append(json.loads(line))
                 except json.JSONDecodeError:
-                    pass  # torn last line from a killed process
+                    pass  # the last line can be cut off if the process was killed mid-write
     return out
 
 
@@ -43,11 +46,12 @@ def now_iso() -> str:
 
 
 def run_key(r: dict) -> tuple:
+    """Identifies one measurement, so a re-run can skip the ones already done."""
     return (r["config_id"], r["workload"], r["concurrency"], r["round"], r["repeat"])
 
 
 def checkpoint_bytes(repo: str) -> int:
-    """Total size of weight files for an HF repo (what must be read per decoded token)."""
+    """Size of the weight files in a Hugging Face repo (what the GPU reads for every token)."""
     from huggingface_hub import snapshot_download
 
     d = pathlib.Path(snapshot_download(repo, allow_patterns=["*.safetensors", "*.json", "*.txt"]))

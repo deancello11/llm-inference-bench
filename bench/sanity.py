@@ -1,6 +1,8 @@
-"""Read real generations before trusting any number (did quantization break the model?).
+"""Print a few real answers so you can check the model still works after quantizing.
 
     python -m bench.sanity --config vllm-awq
+
+Run this before trusting any speed number. A broken model can be very fast.
 """
 from __future__ import annotations
 

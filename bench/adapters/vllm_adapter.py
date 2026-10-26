@@ -1,8 +1,8 @@
-"""vLLM adapter (FP16, AWQ, GPTQ) using the offline engine with manual stepping.
+"""vLLM adapter (FP16, AWQ, GPTQ).
 
-We drive `llm_engine.add_request()/step()` ourselves so we can timestamp each request's
-first token (TTFT) without depending on version-specific `RequestOutput.metrics`.
-Continuous batching + PagedAttention are exactly as in the production server.
+We call the engine's add_request() and step() ourselves, so we can note the time of each
+request's first token without relying on vLLM's own timing fields (they change between
+versions). Batching works the same way as in a real vLLM server.
 """
 from __future__ import annotations
 
@@ -26,18 +26,18 @@ class VLLMAdapter(Adapter):
             gpu_memory_utilization=s["vllm_gpu_memory_utilization"],
             max_model_len=s["vllm_max_model_len"],
             max_num_seqs=s["vllm_max_num_seqs"],
-            enable_prefix_caching=False,  # otherwise repeated prefixes make prefill look free
+            enable_prefix_caching=False,  # otherwise repeated prompt parts would be reused and look free
             seed=0,
         )
         info = {"weights_bytes": checkpoint_bytes(c.checkpoint),
                 "gpu_memory_utilization": s["vllm_gpu_memory_utilization"]}
-        try:  # KV-cache capacity (version-dependent attribute paths)
+        try:  # how many tokens fit in the KV cache (the attribute path differs between vLLM versions)
             eng = self.llm.llm_engine
             cc = getattr(eng, "cache_config", None) or eng.vllm_config.cache_config
             info["kv_cache_blocks"] = cc.num_gpu_blocks
             info["kv_cache_block_size"] = cc.block_size
             info["kv_cache_tokens"] = cc.num_gpu_blocks * cc.block_size
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             info["kv_cache_error"] = repr(e)
         self.load_info = info
 
@@ -67,7 +67,7 @@ class VLLMAdapter(Adapter):
             for r in rids
         ]
 
-    # ---- quality path ------------------------------------------------------------
+    # ---- quality tests -----------------------------------------------------------
     def score_windows(self, windows):
         from vllm import SamplingParams
 
@@ -98,5 +98,5 @@ class VLLMAdapter(Adapter):
             import torch
 
             torch.cuda.empty_cache()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            pass  # cleanup is best effort

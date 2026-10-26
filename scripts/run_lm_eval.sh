@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# OPTIONAL cross-check of our built-in accuracy numbers using EleutherAI lm-evaluation-harness
-# (HF and vLLM backends only; its llama.cpp loglikelihood support is unreliable, which is why
-# the main results use bench.quality.mc_eval for all three stacks).
+# Optional extra check of our accuracy numbers, using EleutherAI's lm-evaluation-harness.
+# It only covers Hugging Face and vLLM, because its llama.cpp support isn't reliable. That is
+# why the main results use bench/quality/mc_eval.py for all three stacks. This was not run
+# for the published results.
 #
-# Run inside the HF venv for hf-*, inside the vLLM venv for vllm-*:  pip install lm_eval
+# Install first:  pip install lm_eval
+# Run the hf-* lines in the HF venv and the vllm-* lines in the vLLM venv.
 set -euo pipefail
 OUT=results/lm_eval
 mkdir -p "$OUT"
 TASKS=arc_challenge,hellaswag,mmlu
-LIMIT=${LIMIT:-}   # e.g. LIMIT=0.1 for a 10% subset
+LIMIT=${LIMIT:-}   # for a quick test use a fraction, for example LIMIT=0.1 for 10%
 
 lm_eval --model hf --model_args pretrained=Qwen/Qwen2.5-3B-Instruct,dtype=float16 \
   --tasks $TASKS ${LIMIT:+--limit $LIMIT} --output_path "$OUT/hf-fp16"

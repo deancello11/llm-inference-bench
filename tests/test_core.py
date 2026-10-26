@@ -19,7 +19,7 @@ def test_prompts_exact_length_distinct_deterministic():
     c = make_prompts(128, 4, seed_for("short", 4, 0, 0, 1))
     assert a == b and a != c
     assert all(len(p) == 128 for p in a)
-    assert len({tuple(p) for p in a}) == 4          # distinct => no prefix-cache hits
+    assert len({tuple(p) for p in a}) == 4          # all different, so the prompt cache can't be reused
 
 
 def test_trapezoid_constant_power():
@@ -37,7 +37,7 @@ def test_percentile():
 
 def test_pareto_frontier_min_x_max_y():
     pts = [(1, 50), (2, 70), (3, 60), (4, 80), (2, 70)]
-    # (3,60) dominated by (2,70); the duplicate (2,70) points don't dominate each other
+    # (3,60) is beaten by (2,70). The two identical (2,70) points don't beat each other.
     assert pareto_frontier(pts) == [0, 1, 4, 3]
 
 
