@@ -37,6 +37,23 @@ data to read for every word it writes. The cost is a small loss in accuracy.
 
 Config names look like `stack-precision`, for example `vllm-awq`. `fp16` is the full 16-bit model, `int8` and `q8` are 8-bit.
 
+## Why fewer bits should be faster, and my hypothesis
+
+The idea behind the whole project is this chain:
+
+1. Quantization stores the weights with fewer bits, so they take fewer bytes.
+2. To write each token, the GPU has to fetch all the weights from its memory.
+3. Fewer bytes means each fetch takes less time.
+4. Each token is ready sooner, so the model writes more tokens per second.
+5. Faster tokens also mean less energy per token, because the GPU spends less time working on each one.
+
+**Hypothesis:** the fewer bits each weight uses, the more tokens per second the model will write. Energy per token should
+drop too, but how much depends on how many requests run at once. With one user, the GPU spends most of its time waiting on
+memory, so smaller weights save a lot of time and energy. With many users at once, the GPU shares each memory fetch
+between all of them and spends more of its time on math, so shrinking the weights should help less.
+
+I check this against the results below.
+
 ## How to read the numbers
 
 - **Token:** the small piece of text a model reads and writes, about three-quarters of a word. 100 tokens is roughly 75 words.
@@ -96,6 +113,28 @@ bitsandbytes NF4 lost the most (about 4 points).
 
 The long-prompt results (1024 tokens), the c=8 results and every individual run are in
 `results/runs.jsonl` and `results/charts/summary.csv`. More charts are in `results/charts/`.
+
+### Did the hypothesis hold?
+
+Mostly, with one clear exception. Here is 16-bit against 4-bit in the same program, with one user and with 32 users:
+
+| program | | total tokens/s, 16-bit to 4-bit | energy per token, 16-bit to 4-bit |
+|---|---|---|---|
+| vLLM (AWQ) | 1 user | 132 to 278 (2.1x faster) | 2282 to 906 mJ (60% less) |
+| vLLM (AWQ) | 32 users | 3351 to 6317 (1.9x faster) | 100 to 54 mJ (46% less) |
+| llama.cpp (Q4_K_M) | 1 user | 131 to 297 (2.3x faster) | 2197 to 989 mJ (55% less) |
+| llama.cpp (Q4_K_M) | 32 users | 1437 to 1758 (1.2x faster) | 126 to 85 mJ (32% less) |
+| Hugging Face (NF4) | 1 user | 88 to 61 (slower) | 2640 to 1965 mJ (26% less) |
+| Hugging Face (NF4) | 32 users | 2449 to 1475 (slower) | 113 to 147 mJ (31% more) |
+
+- **Fewer bits meant more tokens per second in vLLM and llama.cpp, as predicted.** It did not in Hugging Face with bitsandbytes,
+  where the extra work of unpacking the weights cost more than the memory it saved.
+- **The energy saving shrank when more requests ran at once**, as predicted: 60% to 46% in vLLM and 55% to 32% in llama.cpp.
+  The gain from fewer bits is still there with many users, just smaller.
+- **Hugging Face NF4 is the case where energy went the other way.** With one user it used less energy than 16-bit, but with
+  32 users it used more. Smaller weights only help if the software can use that to go faster.
+
+I didn't test why llama.cpp's speedup shrinks so much at 32 users, so I can't say whether it fits the explanation in my hypothesis.
 
 ## Which setup for which job
 
