@@ -14,6 +14,9 @@ The full explanation is in [docs/WRITEUP.md](docs/WRITEUP.md).
 
 ![Accuracy vs energy per token](results/charts/pareto.png)
 
+How to read the chart: each dot is one setup. Higher means more accurate, and further left means less energy per token,
+so the best setups are in the top left. The dashed line connects the setups that nothing else beats on both.
+
 ## Background
 
 **Quantization.** A model is a huge list of numbers called weights. Normally each one is stored in 16 bits.
@@ -34,10 +37,20 @@ data to read for every word it writes. The cost is a small loss in accuracy.
 
 Config names look like `stack-precision`, for example `vllm-awq`. `fp16` is the full 16-bit model, `int8` and `q8` are 8-bit.
 
+## How to read the numbers
+
+- **Token:** the small piece of text a model reads and writes, about three-quarters of a word. 100 tokens is roughly 75 words.
+  A model writes its answer one token at a time.
+- **Tokens per second:** how fast the model writes. **Higher is better.**
+- **mJ per token:** how much GPU energy it takes to write one token. **Lower is better.**
+- **c=1 and c=32:** how many requests run at the same time. c=1 is one user. c=32 is a busy service with 32 users at once.
+- **Accuracy:** how many test questions the model gets right. **Higher is better.**
+- **Perplexity:** how well the model predicts normal text. **Lower is better.**
+- **Model size:** how much memory the weights take. **Lower is better**, because a smaller model fits on smaller GPUs and is quicker to read.
+
 ## Results
 
-Each row is one config. "c=1" means one request at a time (like a single user), and "c=32" means 32 requests at once
-(like a busy service). The prompt is 128 tokens and each reply is exactly 256 tokens. Every number is the median
+Each row is one setup. The prompt is 128 tokens and each reply is exactly 256 tokens. Every number is the median
 of 6 timed runs.
 
 | config | tokens/s (c=1) | mJ per token (c=1) | tokens/s (c=32) | mJ per token (c=32) | model size GB | accuracy % | perplexity |
@@ -52,19 +65,55 @@ of 6 timed runs.
 | llamacpp-q8 | 215 | 1330 | 1625 | 96 | 3.62 | 75.0 | 7.75* |
 | llamacpp-q4km | 309 | 989 | 1758 | 85 | 2.10 | 74.0 | 7.98* |
 
-- **mJ per token** is millijoules of GPU energy for each generated token. Lower is better.
-- **accuracy** is the average of three tests: ARC-Challenge, MMLU and HellaSwag. A difference under about 1 point is just noise.
-- **perplexity** is how well the model predicts normal text (WikiText-2). Lower is better.
-- \*llama.cpp scores perplexity its own way, so only compare those three numbers with each other.
+Accuracy is the average of three tests (ARC-Challenge, MMLU and HellaSwag), and a difference under about 1 point is just noise.
+Perplexity is measured on WikiText-2. \*llama.cpp scores perplexity its own way, so only compare those three numbers with each other.
 
-What stands out:
-- The best 4-bit setups (vLLM AWQ and GPTQ, llama.cpp Q4_K_M) are about 2.2x faster than their own 16-bit versions, and cost about 1 to 3 accuracy points.
-- With many requests at once, vLLM is far ahead: about 6,300 tokens/s with AWQ or GPTQ, against 1,400 to 1,800 for llama.cpp.
-- Batching saves a lot of energy. Going from 1 request to 32 cut the energy per token by 12 to 24 times.
-- bitsandbytes was the slowest. 8-bit ran at 19 tokens/s against 88 for 16-bit, even though it reads half as many bytes.
+### What the results mean
 
-The long-prompt results (1024 tokens), the concurrency 8 results and every individual run are in
+**1. Smaller models are faster, because memory speed is the limit.** To write each token, the GPU has to read the whole
+model from its memory, like an author rereading the whole book before every word. A 4-bit model is about a third of the
+size, so there is less to read. In vLLM and llama.cpp, 4-bit was about 2.2x faster than the same program running 16-bit,
+not 3x, because every token also has a small fixed cost that doesn't shrink with the model. (Hugging Face's 4-bit mode
+was the exception. See point 3.)
+
+**2. Handling many requests at once saves a lot of energy.** With one user, the GPU reads the whole model to write one word.
+With 32 users, it reads the model once and uses that one read to move all 32 conversations forward. It is like one bus
+instead of 32 taxis. In my tests, 32 requests cut the energy per token by 12 to 24 times. The GPU only draws a little more
+power, but it produces far more tokens. Each user also barely waits longer: Hugging Face 16-bit went from 88 tokens/s
+alone to 81 tokens/s per user with 32 users.
+
+**3. The software matters about as much as the number of bits.** The same precision can run at very different speeds
+depending on which program runs it:
+- Both vLLM AWQ and llama.cpp Q4_K_M are 4-bit. With 32 requests, vLLM made 6,317 tokens/s and llama.cpp made 1,758.
+- Hugging Face's 4-bit mode (NF4, from bitsandbytes) was slower than its own 16-bit: 61 tokens/s against 88.
+- Both llama.cpp Q8 and Hugging Face 8-bit (bitsandbytes) are 8-bit. llama.cpp ran at 215 tokens/s and bitsandbytes at 19.
+  The bitsandbytes 8-bit mode was even about 5x slower than plain 16-bit (88), even though it reads half as many bytes.
+  It does extra work on every layer, and that extra work costs more than the memory it saves. I didn't profile it, so that
+  is the known reason and not something I measured.
+
+**4. 8-bit costs almost nothing in accuracy. 4-bit costs about 1 to 3 points.** llama.cpp Q4_K_M lost the least, and
+bitsandbytes NF4 lost the most (about 4 points).
+
+The long-prompt results (1024 tokens), the c=8 results and every individual run are in
 `results/runs.jsonl` and `results/charts/summary.csv`. More charts are in `results/charts/`.
+
+## Which setup for which job
+
+These picks come from my results on one RTX 4090, so they are a guide and not a rule.
+
+| Job | Example | Best pick | Why |
+|---|---|---|---|
+| One person chatting | A private assistant or coding helper on your own computer | llama.cpp Q4_K_M | Fastest for one user (309 tokens/s), the first word shows up in 35 ms, a 256-token reply takes under a second, and it lost the least accuracy of the 4-bit options (about 1 point). |
+| One person, quality matters most | Drafting an important email or report | llama.cpp Q8_0 | 215 tokens/s with no accuracy loss I could measure. |
+| Many users at once | A support chatbot or a public API | vLLM with AWQ or GPTQ | About 6,300 tokens/s with 32 requests at once, and about 54 mJ per token. That is the most output for the least energy. |
+| Many users, no accuracy loss allowed | A tool where wrong answers are costly | vLLM 16-bit | Same accuracy as the full model (75.2) and still 3,351 tokens/s with 32 requests. |
+| Big jobs that run overnight | Summarizing or labeling thousands of documents | vLLM with AWQ or GPTQ | Nobody is waiting, so only total speed and energy matter. With long 1024-token inputs it did about 2,950 tokens/s at 125 mJ per token. |
+| A small or shared GPU | Running next to other programs | Any 4-bit model | The weights are only about 2 GB, against 6.2 GB for 16-bit. I only tested a 4090, so I didn't test other GPUs. |
+| Quick experiments | Trying a few prompts in a notebook | Hugging Face 16-bit | Easiest to set up, and speed doesn't matter for a few prompts. It is slow at scale. |
+
+What I would avoid for serving: bitsandbytes 8-bit was the slowest and used the most energy per token (4,700 mJ with one user).
+bitsandbytes NF4 was slower than 16-bit and the least accurate of the 4-bit options. Its main benefit is fitting the model into less memory,
+not speed.
 
 ## How I measured
 
