@@ -4,8 +4,8 @@ The server is (re)started whenever the concurrency level changes, with one slot 
 concurrent request. Prompts are sent as raw token ids so input length is exact, prefix
 caching is disabled per request, and EOS is ignored so output length is exact.
 
-Silent-failure guard: we parse the server log and refuse to benchmark unless ALL layers
-were offloaded to the GPU (a CPU-fallback llama.cpp looks 10x slower and is a classic
+Silent-failure guard: we refuse to benchmark unless GPU memory grew by about the model size
+after the server loads (a CPU-fallback llama.cpp looks 10x slower and is a classic
 benchmarking mistake).
 """
 from __future__ import annotations
@@ -36,6 +36,13 @@ def find_binary(name: str, env_var: str) -> str:
     if found:
         return found
     raise FileNotFoundError(f"{name} not found. Build llama.cpp (scripts/setup_envs.sh) or set ${env_var}.")
+
+
+def _gpu_used_mib() -> float:
+    import pynvml
+
+    pynvml.nvmlInit()
+    return pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(0)).used / 2**20
 
 
 _SHARD = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
@@ -88,6 +95,7 @@ class LlamaCppAdapter(Adapter):
 
     def _start_server(self, parallel: int):
         self._stop_server()
+        mem_before = _gpu_used_mib()
         s = self.settings
         log_path = self.log_dir / f"llama-server_{self.cfg.id}_np{parallel}.log"
         cmd = [
@@ -114,15 +122,26 @@ class LlamaCppAdapter(Adapter):
         self.parallel = parallel
         self._check_gpu_offload(log_path)
 
-    def _check_gpu_offload(self, log_path: pathlib.Path):
+    def _check_gpu_offload(self, log_path: pathlib.Path, mem_before_mib: float):
+        """Refuse to benchmark unless the weights really landed on the GPU.
+
+        Primary check is NVML device memory (independent of llama.cpp's log wording, which
+        changed between versions): it must have grown by >= 80% of the weight size. The
+        classic "offloaded N/N layers" log line is also checked when this build prints it.
+        """
         text = log_path.read_text(encoding="utf-8", errors="replace")
         m = re.search(r"offloaded (\d+)/(\d+) layers to GPU", text)
-        if not m:
-            raise RuntimeError(f"could not find GPU offload line in {log_path}; is this a CUDA build?")
-        done, total = int(m.group(1)), int(m.group(2))
-        self.load_info["gpu_layers"] = f"{done}/{total}"
-        if done != total:
-            raise RuntimeError(f"llama.cpp offloaded only {done}/{total} layers to GPU; refusing to benchmark")
+        if m:
+            done, total = int(m.group(1)), int(m.group(2))
+            self.load_info["gpu_layers"] = f"{done}/{total}"
+            if done != total:
+                raise RuntimeError(f"llama.cpp offloaded only {done}/{total} layers to GPU; refusing to benchmark")
+        delta = _gpu_used_mib() - mem_before_mib
+        need = 0.8 * self.load_info["weights_bytes"] / 2**20
+        self.load_info["gpu_mem_delta_mib"] = round(delta)
+        if delta < need:
+            raise RuntimeError(f"GPU memory grew only {delta:.0f} MiB after loading a {need / 0.8:.0f} MiB model "
+                               f"(need >= {need:.0f}); llama.cpp is not using the GPU. See {log_path}")
 
     def prepare(self, concurrency: int):
         if self.parallel != concurrency:
