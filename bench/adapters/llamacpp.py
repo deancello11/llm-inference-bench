@@ -120,7 +120,7 @@ class LlamaCppAdapter(Adapter):
         else:
             raise RuntimeError(f"llama-server did not become healthy; see {log_path}")
         self.parallel = parallel
-        self._check_gpu_offload(log_path)
+        self._check_gpu_offload(log_path, mem_before)
 
     def _check_gpu_offload(self, log_path: pathlib.Path, mem_before_mib: float):
         """Refuse to benchmark unless the weights really landed on the GPU.
